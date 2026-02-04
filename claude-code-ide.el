@@ -743,13 +743,14 @@ If the window is not visible, it will be shown in a side window."
             (setf (claude-code-ide-mcp-session-original-tab session) (tab-bar--current-tab))))
         (claude-code-ide-debug "Claude Code window shown")))))
 
-(defun claude-code-ide--build-claude-command (&optional continue resume session-id)
+(defun claude-code-ide--build-claude-command (&optional continue resume session-id system-prompt-file)
   "Build the Claude command with optional flags.
 If CONTINUE is non-nil, add the -c flag.
 If RESUME is non-nil, add the -r flag.
 If SESSION-ID is provided, it's included in the MCP server URL path.
 If `claude-code-ide-cli-debug' is non-nil, add the -d flag.
 If `claude-code-ide-system-prompt' is non-nil, add the --append-system-prompt flag.
+If SYSTEM-PROMPT-FILE is provided, add the --system-prompt flag with the file path.
 Additional flags from `claude-code-ide-cli-extra-flags' are also included."
   (let ((claude-cmd claude-code-ide-cli-path))
     ;; Add debug flag if enabled
@@ -761,17 +762,23 @@ Additional flags from `claude-code-ide-cli-extra-flags' are also included."
     ;; Add continue flag if requested
     (when continue
       (setq claude-cmd (concat claude-cmd " -c")))
-    ;; Add append-system-prompt flag with Emacs context
-    (let ((emacs-prompt "IMPORTANT: Connected to Emacs via claude-code-ide.el integration. Emacs uses mixed coordinates: Lines: 1-based (line 1 = first line), Columns: 0-based (column 0 = first column). Example: First character in file is at line 1, column 0. Available: xref (LSP), tree-sitter, imenu, project.el, flycheck/flymake diagnostics. Context-aware with automatic project/file/selection tracking.")
-          (combined-prompt nil))
-      ;; Always include the Emacs-specific prompt
-      (setq combined-prompt emacs-prompt)
-      ;; Append user's custom prompt if set
-      (when claude-code-ide-system-prompt
-        (setq combined-prompt (concat combined-prompt "\n\n" claude-code-ide-system-prompt)))
-      ;; Add the combined prompt to the command
-      (setq claude-cmd (concat claude-cmd " --append-system-prompt "
-                               (shell-quote-argument combined-prompt))))
+    ;; Add system-prompt file if provided (for swarm preset injection)
+    ;; When file is provided, skip --append-system-prompt to avoid conflicts
+    ;; NOTE: --system-prompt expects TEXT not file path, so use $(cat file)
+    (if (and system-prompt-file (file-exists-p system-prompt-file))
+        (setq claude-cmd (concat claude-cmd " --system-prompt \"$(cat "
+                                 (shell-quote-argument system-prompt-file) ")\""))
+      ;; No preset file - add append-system-prompt with Emacs context
+      (let ((emacs-prompt "IMPORTANT: Connected to Emacs via claude-code-ide.el integration. Emacs uses mixed coordinates: Lines: 1-based (line 1 = first line), Columns: 0-based (column 0 = first column). Example: First character in file is at line 1, column 0. Available: xref (LSP), tree-sitter, imenu, project.el, flycheck/flymake diagnostics. Context-aware with automatic project/file/selection tracking.")
+            (combined-prompt nil))
+        ;; Always include the Emacs-specific prompt
+        (setq combined-prompt emacs-prompt)
+        ;; Append user's custom prompt if set
+        (when claude-code-ide-system-prompt
+          (setq combined-prompt (concat combined-prompt "\n\n" claude-code-ide-system-prompt)))
+        ;; Add the combined prompt to the command
+        (setq claude-cmd (concat claude-cmd " --append-system-prompt "
+                                 (shell-quote-argument combined-prompt)))))
     ;; Add any extra flags
     (when (and claude-code-ide-cli-extra-flags
                (not (string-empty-p claude-code-ide-cli-extra-flags)))
@@ -797,7 +804,7 @@ Additional flags from `claude-code-ide-cli-extra-flags' are also included."
                    (mapconcat 'identity claude-code-ide-mcp-allowed-tools " "))
                   ;; String pattern or nil
                   (t claude-code-ide-mcp-allowed-tools))))
-            (when allowed-tools
+            (when (and allowed-tools (not (string-empty-p allowed-tools)))
               (setq claude-cmd (concat claude-cmd " --allowedTools " allowed-tools)))))))
     claude-cmd))
 
@@ -837,7 +844,7 @@ and args is a list of arguments."
     (cons (car parts) (cdr parts))))
 
 
-(defun claude-code-ide--create-terminal-session (buffer-name working-dir port continue resume session-id)
+(defun claude-code-ide--create-terminal-session (buffer-name working-dir port continue resume session-id &optional system-prompt-file)
   "Create a new terminal session for Claude Code.
 BUFFER-NAME is the name for the terminal buffer.
 WORKING-DIR is the working directory.
@@ -845,12 +852,13 @@ PORT is the MCP server port.
 CONTINUE is whether to continue the most recent conversation.
 RESUME is whether to resume a previous conversation.
 SESSION-ID is the unique identifier for this session.
+SYSTEM-PROMPT-FILE is an optional path to a file containing system prompt content.
 
 Returns a cons cell of (buffer . process) on success.
 Signals an error if terminal fails to initialize."
   ;; Ensure terminal backend is available before proceeding
   (claude-code-ide--terminal-ensure-backend)
-  (let* ((claude-cmd (claude-code-ide--build-claude-command continue resume session-id))
+  (let* ((claude-cmd (claude-code-ide--build-claude-command continue resume session-id system-prompt-file))
          (default-directory working-dir)
          (env-vars (list (format "CLAUDE_CODE_SSE_PORT=%d" port)
                          "ENABLE_IDE_INTEGRATION=true"
